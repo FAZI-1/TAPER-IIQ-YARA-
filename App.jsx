@@ -1,82 +1,83 @@
-import { useMemo, useState } from "react";
-import "./styles.css";
+import { useEffect, useMemo, useState } from "react";
+import {
+  FREQUENCIES,
+  DURATION_UNITS,
+  buildCompactLine,
+  buildSummary,
+  calculatePlan,
+  formatNumber,
+  getWarnings,
+  validateAll,
+} from "./calculator.js";
 
-const DOSE_PRESETS = [35, 30, 25, 20, 15, 10, 5];
-const STRENGTH_PRESETS = [10, 5, 2, 0.5];
-const DURATION_PRESETS = [1, 2, 3, 4, 6, 8];
+const STORAGE_KEY = "taper-checker-draft-v2";
 
-const uid = () =>
+const newId = () =>
   globalThis.crypto?.randomUUID?.() ??
   `step-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-const blankStep = (dose = "", strength = "", weeks = "1") => ({
-  id: uid(),
-  dose,
-  strength,
-  weeks,
+const createStep = () => ({
+  id: newId(),
+  tablets: "",
+  doseMg: "",
+  frequency: "OD",
+  customDosesPerDay: "",
+  duration: "",
+  durationUnit: "weeks",
 });
 
-const exampleSteps = () =>
-  [35, 30, 25, 20, 15, 10, 5].map((dose) => blankStep(String(dose), "5", "1"));
-
-const n = (value) => Number(value);
-const fmt = (value) => {
-  if (!Number.isFinite(value)) return "—";
-  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, "");
-};
-
-function calculateStep(step) {
-  const dose = n(step.dose);
-  const strength = n(step.strength);
-  const weeks = n(step.weeks);
-
-  const valid =
-    Number.isFinite(dose) &&
-    dose > 0 &&
-    Number.isFinite(strength) &&
-    strength > 0 &&
-    Number.isFinite(weeks) &&
-    weeks > 0;
-
-  if (!valid) {
-    return {
-      valid: false,
-      dose,
-      strength,
-      weeks,
-      days: NaN,
-      tabletsPerDay: NaN,
-      quantity: NaN,
-    };
-  }
-
-  const days = weeks * 7;
-  const tabletsPerDay = dose / strength;
-  const quantity = tabletsPerDay * days;
-
-  return { valid: true, dose, strength, weeks, days, tabletsPerDay, quantity };
-}
+const exampleSteps = () => [
+  { ...createStep(), doseMg: "25", tablets: "5", duration: "1", durationUnit: "weeks" },
+  { ...createStep(), doseMg: "20", tablets: "4", duration: "1", durationUnit: "weeks" },
+  { ...createStep(), doseMg: "15", tablets: "3", duration: "1", durationUnit: "weeks" },
+  { ...createStep(), doseMg: "10", tablets: "2", duration: "1", durationUnit: "weeks" },
+  { ...createStep(), doseMg: "5", tablets: "1", duration: "1", durationUnit: "months" },
+];
 
 function App() {
   const [medicationName, setMedicationName] = useState("");
-  const [steps, setSteps] = useState([blankStep()]);
+  const [strengthMg, setStrengthMg] = useState("");
+  const [entryMode, setEntryMode] = useState("dose");
+  const [steps, setSteps] = useState([createStep()]);
+  const [roundUp, setRoundUp] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [showExamples, setShowExamples] = useState(false);
 
-  const calculated = useMemo(() => steps.map(calculateStep), [steps]);
-  const allValid = calculated.every((step) => step.valid);
-  const totalQuantity = calculated.reduce(
-    (sum, step) => sum + (Number.isFinite(step.quantity) ? step.quantity : 0),
-    0
-  );
-  const totalWeeks = calculated.reduce(
-    (sum, step) => sum + (Number.isFinite(step.weeks) ? step.weeks : 0),
-    0
-  );
-  const totalDays = totalWeeks * 7;
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed.steps) && parsed.steps.length) {
+        setMedicationName(parsed.medicationName ?? "");
+        setStrengthMg(parsed.strengthMg ?? "");
+        setEntryMode(parsed.entryMode === "tablets" ? "tablets" : "dose");
+        setSteps(parsed.steps);
+        setRoundUp(Boolean(parsed.roundUp));
+      }
+    } catch {
+      // Keep safe defaults when stored data is unavailable or malformed.
+    }
+  }, []);
 
-  const fractionalWarnings = calculated
-    .map((step, index) => ({ ...step, index }))
-    .filter((step) => step.valid && !Number.isInteger(step.tabletsPerDay));
+  useEffect(() => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ medicationName, strengthMg, entryMode, steps, roundUp })
+    );
+  }, [medicationName, strengthMg, entryMode, steps, roundUp]);
+
+  const options = useMemo(
+    () => ({ entryMode, strengthMg: Number(strengthMg) }),
+    [entryMode, strengthMg]
+  );
+
+  const errors = useMemo(() => validateAll(steps, options), [steps, options]);
+  const hasErrors = errors.some((item) => Object.keys(item).length > 0);
+  const plan = useMemo(() => calculatePlan(steps, options), [steps, options]);
+  const warnings = useMemo(() => getWarnings(steps, options), [steps, options]);
+  const displayedTotal = roundUp ? Math.ceil(plan.totalQuantity) : plan.totalQuantity;
+  const strengthInvalid = entryMode === "dose" && (!Number.isFinite(Number(strengthMg)) || Number(strengthMg) <= 0);
 
   function updateStep(id, field, value) {
     setSteps((current) =>
@@ -85,56 +86,54 @@ function App() {
   }
 
   function addStep() {
-    setSteps((current) => [...current, blankStep()]);
-  }
-
-  function duplicateStep(index) {
-    const source = steps[index];
-    const copy = { ...source, id: uid() };
-    setSteps((current) => [
-      ...current.slice(0, index + 1),
-      copy,
-      ...current.slice(index + 1),
-    ]);
+    setSteps((current) => [...current, createStep()]);
   }
 
   function removeStep(id) {
-    setSteps((current) =>
-      current.length === 1 ? current : current.filter((step) => step.id !== id)
-    );
+    setSteps((current) => {
+      if (current.length === 1) return current;
+      return current.filter((step) => step.id !== id);
+    });
   }
 
-  function loadExample() {
-    setMedicationName("Example medication");
-    setSteps(exampleSteps());
-  }
-
-  function reset() {
-    setMedicationName("");
-    setSteps([blankStep()]);
+  function moveStep(index, direction) {
+    const target = index + direction;
+    if (target < 0 || target >= steps.length) return;
+    const next = [...steps];
+    [next[index], next[target]] = [next[target], next[index]];
+    setSteps(next);
   }
 
   async function copySummary() {
-    if (!allValid) return;
-
-    const lines = [
-      "TAPER CHECK — QUANTITY VERIFICATION",
-      medicationName.trim() ? `Medication: ${medicationName.trim()}` : "",
-      "",
-      ...calculated.map(
-        (step, i) =>
-          `Step ${i + 1}: ${fmt(step.dose)} mg/day ÷ ${fmt(step.strength)} mg per tablet/capsule = ${fmt(step.tabletsPerDay)} tablets/capsules per day × ${fmt(step.days)} days = ${fmt(step.quantity)} tablets/capsules`
-      ),
-      "",
-      `Total duration: ${fmt(totalWeeks)} weeks (${fmt(totalDays)} days)`,
-      `Total quantity: ${fmt(totalQuantity)} tablets/capsules`,
-      "",
-      "Verification tool only. Final quantity must be checked against the authorized prescription and applicable clinical instructions.",
-    ].filter(Boolean);
-
-    await navigator.clipboard.writeText(lines.join("\n"));
+    if (hasErrors || strengthInvalid) return;
+    const text = buildSummary({
+      medicationName,
+      strengthMg: Number(strengthMg),
+      entryMode,
+      plan: { ...plan, totalQuantity: displayedTotal },
+    });
+    await navigator.clipboard.writeText(text);
     setCopied(true);
-    setTimeout(() => setCopied(false), 1600);
+    window.setTimeout(() => setCopied(false), 1800);
+  }
+
+  function resetPlan() {
+    if (!window.confirm("Reset this taper plan?")) return;
+    setMedicationName("");
+    setStrengthMg("");
+    setEntryMode("dose");
+    setSteps([createStep()]);
+    setRoundUp(false);
+    localStorage.removeItem(STORAGE_KEY);
+  }
+
+  function loadExample() {
+    setMedicationName("Example Medication");
+    setStrengthMg("5");
+    setEntryMode("dose");
+    setSteps(exampleSteps());
+    setRoundUp(false);
+    setShowExamples(false);
   }
 
   return (
@@ -144,57 +143,106 @@ function App() {
           <div className="brand-mark">TC</div>
           <div>
             <h1>Taper Check</h1>
-            <p>Weekly taper quantity calculator & verification tool</p>
+            <p>Quantity calculator & verification tool</p>
           </div>
         </div>
-
         <div className="topbar-actions">
           <div className="leader-badge">
             <span>Project Leader</span>
             <strong>YARA ALOMARI</strong>
           </div>
-          <button className="button ghost" type="button" onClick={reset}>
-            Reset
-          </button>
+          <button className="button ghost" onClick={resetPlan}>Reset</button>
         </div>
       </header>
 
       <section className="hero">
         <div>
-          <span className="eyebrow">WEEK-BY-WEEK VERIFICATION</span>
-          <h2>Choose the dose, tablet strength, and duration for every taper step.</h2>
+          <span className="eyebrow">CALCULATE • REVIEW • VERIFY</span>
+          <h2>Verify a taper schedule and calculate the total quantity clearly.</h2>
           <p>
-            Each row represents one taper period. Enter or select the prescribed daily
-            dose, the strength of the tablet/capsule being used, and the number of weeks.
-            Taper Check calculates the daily unit count, quantity for that period, total
-            duration, and total quantity.
+            Enter the tablet/capsule strength, choose whether you want to enter each
+            step by prescribed dose or by number of tablets/capsules, then review the
+            normalized calculation before using the result.
           </p>
         </div>
-        <button className="button secondary" type="button" onClick={loadExample}>
-          Load 35 → 5 mg example
+        <button className="button secondary" onClick={() => setShowExamples((v) => !v)}>
+          {showExamples ? "Hide example" : "Show 25 mg example"}
         </button>
       </section>
 
-      <section className="panel medication-panel">
+      {showExamples && (
+        <div className="example-banner">
+          <div>
+            <strong>Example:</strong>
+            <span> A prescribed dose of 25 mg with a 5 mg tablet strength equals 5 tablets per dose.</span>
+          </div>
+          <button className="button small" onClick={loadExample}>Load example</button>
+        </div>
+      )}
+
+      <section className="panel">
         <div className="section-heading">
           <div>
             <span className="step-label">01</span>
             <div>
-              <h3>Medication</h3>
-              <p className="muted">Optional label for the verification summary.</p>
+              <h3>Medication details</h3>
+              <p className="muted">Strength is required when entering the schedule by prescribed dose.</p>
             </div>
           </div>
         </div>
 
-        <label className="field medication-name-field">
-          <span>Medication name</span>
-          <input
-            value={medicationName}
-            onChange={(event) => setMedicationName(event.target.value)}
-            placeholder="e.g. Example medication"
-            autoComplete="off"
-          />
-        </label>
+        <div className="grid two">
+          <label className="field">
+            <span>Medication name</span>
+            <input
+              value={medicationName}
+              onChange={(e) => setMedicationName(e.target.value)}
+              placeholder="e.g. Example Medication"
+              autoComplete="off"
+            />
+          </label>
+          <label className={`field ${strengthInvalid ? "has-error" : ""}`}>
+            <span>Tablet / capsule strength (mg)</span>
+            <input
+              type="number"
+              min="0.01"
+              step="0.01"
+              inputMode="decimal"
+              value={strengthMg}
+              onChange={(e) => setStrengthMg(e.target.value)}
+              placeholder="e.g. 5"
+            />
+            {strengthInvalid && <small>Enter a strength greater than 0 mg.</small>}
+          </label>
+        </div>
+
+        <div className="entry-mode-block">
+          <span className="entry-mode-title">Choose how you want to enter each taper step</span>
+          <div className="mode-grid">
+            <button
+              type="button"
+              className={`mode-card ${entryMode === "dose" ? "active" : ""}`}
+              onClick={() => setEntryMode("dose")}
+            >
+              <span className="mode-dot" />
+              <span>
+                <strong>By prescribed dose (mg)</strong>
+                <small>Example: 25 mg with 5 mg tablets = 5 tablets per dose.</small>
+              </span>
+            </button>
+            <button
+              type="button"
+              className={`mode-card ${entryMode === "tablets" ? "active" : ""}`}
+              onClick={() => setEntryMode("tablets")}
+            >
+              <span className="mode-dot" />
+              <span>
+                <strong>By number of tablets / capsules</strong>
+                <small>Enter the unit count directly for every dose.</small>
+              </span>
+            </button>
+          </div>
+        </div>
       </section>
 
       <section className="panel">
@@ -202,212 +250,211 @@ function App() {
           <div>
             <span className="step-label">02</span>
             <div>
-              <h3>Weekly taper steps</h3>
+              <h3>Taper schedule</h3>
               <p className="muted">
-                Use the suggestions or type any valid value manually.
+                {entryMode === "dose"
+                  ? "Enter the prescribed mg dose for each stage; the tablet/capsule count is calculated automatically."
+                  : "Enter the number of tablets/capsules taken at each dose."}
               </p>
             </div>
           </div>
           <span className="count">{steps.length} {steps.length === 1 ? "step" : "steps"}</span>
         </div>
 
-        <datalist id="dose-options">
-          {DOSE_PRESETS.map((value) => <option value={value} key={value} />)}
-        </datalist>
-        <datalist id="strength-options">
-          {STRENGTH_PRESETS.map((value) => <option value={value} key={value} />)}
-        </datalist>
-        <datalist id="duration-options">
-          {DURATION_PRESETS.map((value) => <option value={value} key={value} />)}
-        </datalist>
-
         <div className="steps-list">
           {steps.map((step, index) => {
-            const c = calculated[index];
+            const stepErrors = errors[index];
+            const calculated = plan.steps[index];
+            const preview = entryMode === "dose"
+              ? (step.doseMg ? `${step.doseMg} mg` : "Dose not entered")
+              : (step.tablets ? `${step.tablets} tablets/capsules` : "Count not entered");
 
             return (
-              <article className="step-card weekly-card" key={step.id}>
+              <article className="step-card" key={step.id}>
                 <div className="step-card-head">
                   <div className="step-number">{String(index + 1).padStart(2, "0")}</div>
                   <div>
-                    <strong>Taper period {index + 1}</strong>
-                    <span className="step-preview">
-                      {c.valid
-                        ? `${fmt(c.dose)} mg/day • ${fmt(c.strength)} mg strength • ${fmt(c.weeks)} week${c.weeks === 1 ? "" : "s"}`
-                        : "Choose dose, strength, and duration"}
-                    </span>
+                    <strong>Step {index + 1}</strong>
+                    <span className="step-preview">{preview}</span>
                   </div>
                   <div className="step-actions">
-                    <button
-                      className="icon-button"
-                      type="button"
-                      title="Duplicate step"
-                      onClick={() => duplicateStep(index)}
-                    >
-                      ⧉
-                    </button>
-                    <button
-                      className="icon-button danger"
-                      type="button"
-                      title="Remove step"
-                      disabled={steps.length === 1}
-                      onClick={() => removeStep(step.id)}
-                    >
-                      ×
-                    </button>
+                    <button className="icon-button" title="Move step up" onClick={() => moveStep(index, -1)} disabled={index === 0}>↑</button>
+                    <button className="icon-button" title="Move step down" onClick={() => moveStep(index, 1)} disabled={index === steps.length - 1}>↓</button>
+                    <button className="icon-button danger" title="Remove step" onClick={() => removeStep(step.id)} disabled={steps.length === 1}>×</button>
                   </div>
                 </div>
 
-                <div className="grid three weekly-grid">
-                  <label className={`field ${step.dose && !(n(step.dose) > 0) ? "has-error" : ""}`}>
-                    <span>Prescribed daily dose (mg)</span>
-                    <input
-                      type="number"
-                      list="dose-options"
-                      min="0.01"
-                      step="0.01"
-                      inputMode="decimal"
-                      value={step.dose}
-                      onChange={(event) => updateStep(step.id, "dose", event.target.value)}
-                      placeholder="Select or type, e.g. 35"
-                    />
-                    <small>Suggestions: 35, 30, 25, 20, 15, 10, 5 mg</small>
+                <div className="grid four">
+                  {entryMode === "dose" ? (
+                    <label className={`field ${stepErrors.doseMg ? "has-error" : ""}`}>
+                      <span>Prescribed dose (mg)</span>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        inputMode="decimal"
+                        value={step.doseMg}
+                        onChange={(e) => updateStep(step.id, "doseMg", e.target.value)}
+                        placeholder="e.g. 25"
+                      />
+                      {stepErrors.doseMg && <small>{stepErrors.doseMg}</small>}
+                    </label>
+                  ) : (
+                    <label className={`field ${stepErrors.tablets ? "has-error" : ""}`}>
+                      <span>Tablets / capsules per dose</span>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        inputMode="decimal"
+                        value={step.tablets}
+                        onChange={(e) => updateStep(step.id, "tablets", e.target.value)}
+                        placeholder="e.g. 5"
+                      />
+                      {stepErrors.tablets && <small>{stepErrors.tablets}</small>}
+                    </label>
+                  )}
+
+                  <label className="field">
+                    <span>Frequency</span>
+                    <select value={step.frequency} onChange={(e) => updateStep(step.id, "frequency", e.target.value)}>
+                      {FREQUENCIES.map((item) => (
+                        <option key={item.value} value={item.value}>{item.label}</option>
+                      ))}
+                    </select>
                   </label>
 
-                  <label className={`field ${step.strength && !(n(step.strength) > 0) ? "has-error" : ""}`}>
-                    <span>Tablet / capsule strength (mg)</span>
+                  <label className={`field ${stepErrors.duration ? "has-error" : ""}`}>
+                    <span>Duration</span>
                     <input
                       type="number"
-                      list="strength-options"
                       min="0.01"
                       step="0.01"
                       inputMode="decimal"
-                      value={step.strength}
-                      onChange={(event) => updateStep(step.id, "strength", event.target.value)}
-                      placeholder="Select or type, e.g. 5"
+                      value={step.duration}
+                      onChange={(e) => updateStep(step.id, "duration", e.target.value)}
+                      placeholder="e.g. 7"
                     />
-                    <small>Suggestions: 10, 5, 2, 0.5 mg</small>
+                    {stepErrors.duration && <small>{stepErrors.duration}</small>}
                   </label>
 
-                  <label className={`field ${step.weeks && !(n(step.weeks) > 0) ? "has-error" : ""}`}>
-                    <span>Duration (weeks)</span>
-                    <input
-                      type="number"
-                      list="duration-options"
-                      min="0.01"
-                      step="0.01"
-                      inputMode="decimal"
-                      value={step.weeks}
-                      onChange={(event) => updateStep(step.id, "weeks", event.target.value)}
-                      placeholder="Select or type, e.g. 1"
-                    />
-                    <small>Suggestions: 1, 2, 3, 4, 6, 8 weeks</small>
+                  <label className="field">
+                    <span>Unit</span>
+                    <select value={step.durationUnit} onChange={(e) => updateStep(step.id, "durationUnit", e.target.value)}>
+                      {DURATION_UNITS.map((item) => (
+                        <option key={item.value} value={item.value}>{item.label}</option>
+                      ))}
+                    </select>
                   </label>
                 </div>
 
-                <div className="weekly-results">
-                  <div>
-                    <span>Tablets / capsules per day</span>
-                    <strong>{c.valid ? fmt(c.tabletsPerDay) : "—"}</strong>
-                  </div>
-                  <div>
-                    <span>Days in this period</span>
-                    <strong>{c.valid ? fmt(c.days) : "—"}</strong>
-                  </div>
-                  <div>
-                    <span>Quantity for this period</span>
-                    <strong>{c.valid ? fmt(c.quantity) : "—"}</strong>
-                  </div>
+                {step.frequency === "CUSTOM" && (
+                  <label className={`field custom-frequency ${stepErrors.customDosesPerDay ? "has-error" : ""}`}>
+                    <span>Custom doses per day</span>
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      inputMode="decimal"
+                      value={step.customDosesPerDay}
+                      onChange={(e) => updateStep(step.id, "customDosesPerDay", e.target.value)}
+                      placeholder="e.g. 1.5"
+                    />
+                    {stepErrors.customDosesPerDay && <small>{stepErrors.customDosesPerDay}</small>}
+                  </label>
+                )}
+
+                <div className="calculation-strip">
+                  <span>Normalized dose</span>
+                  <strong>
+                    {Number.isFinite(calculated.tablets) ? `${formatNumber(calculated.tablets)} tablets/capsules` : "—"}
+                    {Number.isFinite(calculated.doseMg) ? ` • ${formatNumber(calculated.doseMg)} mg` : ""}
+                  </strong>
+                  <span className="calculation-detail">
+                    Quantity: {Number.isFinite(calculated.quantity) ? `${formatNumber(calculated.quantity)} units` : "—"}
+                  </span>
                 </div>
               </article>
             );
           })}
         </div>
 
-        <button className="add-step" type="button" onClick={addStep}>
-          + Add next taper period
-        </button>
+        <button className="add-step" onClick={addStep}>+ Add taper step</button>
       </section>
-
-      {fractionalWarnings.length > 0 && (
-        <section className="alerts">
-          {fractionalWarnings.map((item) => (
-            <div className="alert warning" key={item.index}>
-              <span>!</span>
-              <p>
-                Period {item.index + 1} calculates to {fmt(item.tabletsPerDay)} tablets/capsules per day.
-                Verify that the selected strength and dosage form match the authorized prescription.
-              </p>
-            </div>
-          ))}
-        </section>
-      )}
 
       <section className="panel">
         <div className="section-heading">
           <div>
             <span className="step-label">03</span>
             <div>
-              <h3>Verification summary</h3>
-              <p className="muted">A quick period-by-period quantity check.</p>
+              <h3>Taper verification</h3>
+              <p className="muted">Normalized output for a fast manual double-check.</p>
             </div>
           </div>
         </div>
 
-        <div className="summary-table">
-          <div className="summary-head">
-            <span>Period</span>
-            <span>Dose</span>
-            <span>Strength</span>
-            <span>Weeks</span>
-            <span>Units/day</span>
-            <span>Quantity</span>
+        <div className="check-box">
+          <div className="check-sequence">
+            {plan.steps.map((step, index) => (
+              <span key={step.id} className="sequence-item">
+                {Number.isFinite(step.tablets) ? formatNumber(step.tablets) : "—"}
+                <small>{Number(step.tablets) === 1 ? "unit" : "units"}</small>
+                {index < plan.steps.length - 1 && <b>→</b>}
+              </span>
+            ))}
           </div>
 
-          {calculated.map((c, index) => (
-            <div className="summary-row" key={steps[index].id}>
-              <span>#{index + 1}</span>
-              <span>{c.valid ? `${fmt(c.dose)} mg` : "—"}</span>
-              <span>{c.valid ? `${fmt(c.strength)} mg` : "—"}</span>
-              <span>{c.valid ? fmt(c.weeks) : "—"}</span>
-              <span>{c.valid ? fmt(c.tabletsPerDay) : "—"}</span>
-              <strong>{c.valid ? fmt(c.quantity) : "—"}</strong>
-            </div>
-          ))}
+          <div className="normalized-list">
+            {plan.steps.map((step, index) => (
+              <div className="normalized-row" key={step.id}>
+                <span>{buildCompactLine(step, index).split(": ")[1]}</span>
+                <strong>{Number.isFinite(step.quantity) ? `${formatNumber(step.quantity)} units` : "—"}</strong>
+              </div>
+            ))}
+          </div>
         </div>
+
+        {warnings.length > 0 && (
+          <div className="alerts">
+            {warnings.map((item, index) => (
+              <div className={`alert ${item.type}`} key={`${item.message}-${index}`}>
+                <span>{item.type === "warning" ? "!" : "i"}</span>
+                <p>{item.message}</p>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="results">
         <div className="result-card primary">
-          <span>Total quantity required</span>
-          <strong>{allValid ? fmt(totalQuantity) : "—"}</strong>
+          <span>Total quantity</span>
+          <strong>{hasErrors || strengthInvalid ? "—" : formatNumber(displayedTotal)}</strong>
           <small>tablets / capsules</small>
         </div>
         <div className="result-card">
           <span>Total duration</span>
-          <strong>{allValid ? fmt(totalWeeks) : "—"}</strong>
-          <small>weeks</small>
+          <strong>{hasErrors ? "—" : formatNumber(plan.totalDays)}</strong>
+          <small>days</small>
         </div>
         <div className="result-card">
-          <span>Total days</span>
-          <strong>{allValid ? fmt(totalDays) : "—"}</strong>
-          <small>days</small>
+          <span>Steps</span>
+          <strong>{steps.length}</strong>
+          <small>taper stages</small>
         </div>
       </section>
 
       <section className="actions-panel">
-        <div>
-          <strong className="verification-label">Verification output</strong>
-          <p className="muted action-note">
-            Complete all fields to enable the copyable summary.
-          </p>
-        </div>
-        <button
-          className="button primary-button"
-          type="button"
-          disabled={!allValid}
-          onClick={copySummary}
-        >
+        <label className="toggle">
+          <input type="checkbox" checked={roundUp} onChange={(e) => setRoundUp(e.target.checked)} />
+          <span className="toggle-ui"></span>
+          <span>
+            <strong>Round total up to a whole unit</strong>
+            <small>Optional quantity view; the underlying calculation remains unchanged.</small>
+          </span>
+        </label>
+
+        <button className="button primary-button" onClick={copySummary} disabled={hasErrors || strengthInvalid}>
           {copied ? "Copied ✓" : "Copy summary"}
         </button>
       </section>
@@ -426,10 +473,8 @@ function App() {
       </section>
 
       <footer>
-        <span className="footer-leader">
-          Project Leader: <strong>YARA ALOMARI</strong>
-        </span>
-        <span>Taper Check • Weekly quantity verification</span>
+        <span className="footer-leader">Project Leader: <strong>YARA ALOMARI</strong></span>
+        <span>Taper Check • Calculations run locally in your browser.</span>
       </footer>
     </main>
   );
